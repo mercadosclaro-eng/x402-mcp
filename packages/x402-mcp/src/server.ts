@@ -17,6 +17,7 @@ import { x402Version } from "./shared.js";
 import { type ZodRawShape } from "zod";
 import type { Address } from "viem";
 import z from "zod";
+import { Address as SolanaAddress } from "@solana/kit";
 
 type Config = NonNullable<Parameters<typeof createMcpHandler>[2]>;
 
@@ -25,9 +26,18 @@ export interface ServerPaymentOptions {
 }
 
 export interface ServerPaymentConfig {
-	recipient: Address;
+	recipient: Address | SolanaAddress;
 	facilitator: FacilitatorConfig;
-	network: "base-sepolia" | "base";
+	network:
+		| "base-sepolia"
+		| "base"
+		| "solana"
+		| "solana-devnet"
+		| "avalanche-fuji"
+		| "avalanche"
+		| "iotex"
+		| "sei"
+		| "sei-testnet";
 }
 
 export interface ConfigWithPayment extends Config, ServerPaymentConfig {}
@@ -60,7 +70,7 @@ function createPaidToolMethod(
 		cb,
 	) => {
 		const cbWithPayment: ToolCallback<any> = async (args, extra) => {
-			const { verify, settle } = useFacilitator(config.facilitator);
+			const { verify, settle, supported } = useFacilitator(config.facilitator);
 			const makeErrorResponse = (obj: Record<string, unknown>) => {
 				return {
 					isError: true,
@@ -77,7 +87,32 @@ function createPaidToolMethod(
 			if ("error" in atomicAmountForAsset) {
 				throw new Error("Failed to process price to atomic amount");
 			}
+
+			const paymentKinds = await supported();
 			const { maxAmountRequired, asset } = atomicAmountForAsset;
+			let extraRecord = {
+				asset: asset.address,
+				feePayer: undefined as string | undefined,
+			};
+
+			let feePayer: string | undefined;
+
+			if (config.network === "solana" || config.network === "solana-devnet") {
+				for (const kind of paymentKinds.kinds) {
+					if (kind.network === config.network && kind.scheme === "exact") {
+						feePayer = kind?.extra?.feePayer;
+						break;
+					}
+				}
+
+				if (!feePayer) {
+					throw new Error(
+						`The facilitator did not provide a fee payer for network: ${config.network}`,
+					);
+				}
+					extraRecord.feePayer = feePayer;
+			}
+
 			const paymentRequirements: PaymentRequirements = {
 				scheme: "exact",
 				network: config.network,
@@ -88,7 +123,7 @@ function createPaidToolMethod(
 				resource: `mcp://tool/${name}`,
 				mimeType: "application/json",
 				description,
-				extra: asset.eip712,
+				extra: extraRecord,
 			};
 
 			if (!payment) {
@@ -96,19 +131,19 @@ function createPaidToolMethod(
 					x402Version,
 					error: "_meta.x402/payment is required",
 					accepts: [paymentRequirements],
-				}) as any; // I genuinely dont why this is needed
+				}); 
 			}
 
 			let decodedPayment: PaymentPayload;
 			try {
-				decodedPayment = exact.evm.decodePayment(z.string().parse(payment));
+				decodedPayment = exact.evm.decodePayment(z.string().parse(payment))
 				decodedPayment.x402Version = x402Version;
 			} catch (error) {
 				return makeErrorResponse({
 					x402Version,
 					error: "Invalid payment",
 					accepts: [paymentRequirements],
-				}) as any; // I genuinely dont why this is needed
+				})
 			}
 
 			const verification = await verify(decodedPayment, paymentRequirements);
@@ -118,7 +153,7 @@ function createPaidToolMethod(
 					error: verification.invalidReason,
 					accepts: [paymentRequirements],
 					payer: verification.payer,
-				}) as any;
+				})
 			}
 
 			// Execute the tool

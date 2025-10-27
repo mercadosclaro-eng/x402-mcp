@@ -12,14 +12,28 @@ export const maxDuration = 30;
 export const POST = async (request: Request) => {
 	const { messages, model }: { messages: UIMessage[]; model: string } =
 		await request.json();
+	
+	// Create MCP client with payment based on network type
+	const mcpEvmClientPromise = createMCPClient({
+		transport: new StreamableHTTPClientTransport(new URL("/mcp/evm", env.URL)),
+	});
 
-	const account = await getOrCreatePurchaserAccount();
+	const mcpSvmClientPromise = createMCPClient({
+		transport: new StreamableHTTPClientTransport(new URL("/mcp/svm", env.URL)),
+	});
 
-	const mcpClient = await createMCPClient({
-		transport: new StreamableHTTPClientTransport(new URL("/mcp", env.URL)),
-	}).then((client) => withPayment(client, { account, network: env.NETWORK }));
+	const mcpSvmClient = await mcpSvmClientPromise.then(async (client) => {
+		const account = await getOrCreatePurchaserAccount("svm");
+		return withPayment(client, { account, network: "solana" });
+	});
 
-	const tools = await mcpClient.tools();
+	const mcpEvmClient = await mcpEvmClientPromise.then(async (client) => {
+		const account = await getOrCreatePurchaserAccount("evm");
+		return withPayment(client, { account, network: env.EVM_NETWORK });
+	});
+
+	// const tools = await mcpClient.tools();
+	const tools = {...await mcpSvmClient.tools(), ...await mcpEvmClient.tools()};
 
 	const result = streamText({
 		model,
@@ -38,13 +52,14 @@ export const POST = async (request: Request) => {
 		messages: convertToModelMessages(messages),
 		stopWhen: stepCountIs(5),
 		onFinish: async () => {
-			await mcpClient.close();
+			await mcpSvmClient.close();
+			await mcpEvmClient.close();
 		},
 		system: "ALWAYS prompt the user to confirm before authorizing payments",
 	});
 	return result.toUIMessageStreamResponse({
 		sendSources: true,
 		sendReasoning: true,
-		messageMetadata: () => ({ network: env.NETWORK }),
+		messageMetadata: () => ({ networks : ["solana", "ethereum"]}),
 	});
 };
